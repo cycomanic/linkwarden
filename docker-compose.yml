@@ -1,28 +1,36 @@
 services:
-  postgres:
+  postgres-linkwarden:
     image: postgres:16-alpine
     env_file: .env
     restart: always
     volumes:
-      - ./pgdata:/var/lib/postgresql/data
+      - /${DOCKER_VOLUME_STORAGE:-/var/docker/appdata}/linkwarden/pgdata:/var/lib/postgresql/data
   linkwarden:
     env_file: .env
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
     restart: always
-    # build: . # uncomment to build from source
-    image: ghcr.io/linkwarden/linkwarden:latest # comment to build from source
+    build: . # uncomment to build from source
+    #image: ghcr.io/linkwarden/linkwarden:latest # comment to build from source
     ports:
       - 3000:3000
     volumes:
-      - ./data:/data/data
+      - /${DOCKER_VOLUME_STORAGE:-/var/docker/appdata}/linkwarden/data:/data/data
     depends_on:
       - postgres
       - meilisearch
-  meilisearch:
+    networks:
+      - cloud
+      - linkwarden-net
+  meilisearch-linkwarden:
     image: getmeili/meilisearch:v1.12.8
     restart: always
     env_file:
       - .env
     volumes:
-      - ./meili_data:/meili_data
+      - /${DOCKER_VOLUME_STORAGE:-/var/docker/appdata}/linkwarden/meili_data:/meili_data
+networks:
+  linkwarden-net:
+  cloud:
+    external: true
+    name: cloud-shared
