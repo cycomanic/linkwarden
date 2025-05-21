@@ -1,16 +1,10 @@
-import {
-  Browser,
-  BrowserContext,
-  BrowserContextOptions,
-  LaunchOptions,
-  chromium,
-  devices,
-} from "playwright";
-import { prisma } from "@linkwarden/prisma";
+import { Browser, BrowserContext, BrowserContextOptions, LaunchOptions, chromium, devices } from "playwright";
+import { prisma } from "./db";
 import sendToWayback from "./preservationScheme/sendToWayback";
-import { AiTaggingMethod } from "@linkwarden/prisma/client";
+import { AiTaggingMethod } from "@prisma/client";
 import fetchHeaders from "./fetchHeaders";
-import { createFolder, removeFiles } from "@linkwarden/filesystem";
+import createFolder from "./storage/createFolder";
+import { removeFiles } from "./manageLinkFiles";
 import handleMonolith from "./preservationScheme/handleMonolith";
 import handleReadability from "./preservationScheme/handleReadability";
 import handleArchivePreview from "./preservationScheme/handleArchivePreview";
@@ -18,11 +12,19 @@ import handleScreenshotAndPdf from "./preservationScheme/handleScreenshotAndPdf"
 import imageHandler from "./preservationScheme/imageHandler";
 import pdfHandler from "./preservationScheme/pdfHandler";
 import autoTagLink from "./autoTagLink";
-import { LinkWithCollectionOwnerAndTags } from "@linkwarden/types";
-import { isArchivalTag } from "@linkwarden/lib";
-import { ArchivalSettings } from "@linkwarden/types";
+import { LinkWithCollectionOwnerAndTags } from "../../types/global";
+import isArchivalTag from "../shared/isArchivalTag";
 
 const BROWSER_TIMEOUT = Number(process.env.BROWSER_TIMEOUT) || 5;
+
+export interface ArchivalSettings {
+  archiveAsScreenshot: boolean;
+  archiveAsMonolith: boolean;
+  archiveAsPDF: boolean;
+  archiveAsReadable: boolean;
+  archiveAsWaybackMachine: boolean;
+  aiTag: boolean;
+}
 
 export default async function archiveHandler(
   link: LinkWithCollectionOwnerAndTags
@@ -57,18 +59,16 @@ export default async function archiveHandler(
     return;
   }
 
-  const abortController = new AbortController();
-
   const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => {
-      abortController.abort();
-
-      return reject(
-        new Error(
-          `Browser has been open for more than ${BROWSER_TIMEOUT} minutes.`
-        )
-      );
-    }, BROWSER_TIMEOUT * 60000);
+    setTimeout(
+      () =>
+        reject(
+          new Error(
+            `Browser has been open for more than ${BROWSER_TIMEOUT} minutes.`
+          )
+        ),
+      BROWSER_TIMEOUT * 60000
+    );
   });
 
   const { browser, context } = await getBrowser();
@@ -141,15 +141,6 @@ export default async function archiveHandler(
           if (archivalSettings.archiveAsReadable && !link.readable)
             await handleReadability(content, link);
 
-          // Screenshot/PDF
-          if (
-            (archivalSettings.archiveAsScreenshot && !link.image) ||
-            (archivalSettings.archiveAsPDF && !link.pdf)
-          )
-            await handleScreenshotAndPdf(link, page, archivalSettings);
-
-          await browser.close();
-
           // Auto-tagging
           if (
             archivalSettings.aiTag &&
@@ -161,27 +152,37 @@ export default async function archiveHandler(
               process.env.ANTHROPIC_API_KEY ||
               process.env.OPENROUTER_API_KEY)
           )
-            await autoTagLink(user, link.id, metaDescription);
+            if (!link.textContent){
+              await autoTagLink(user, link.id, metaDescription, link.textContent || undefined, link.name );
+            }
+            else{
+              await autoTagLink(user, link.id, metaDescription, "", link.name );
+          }
+
+          // Screenshot/PDF
+          if (
+            (archivalSettings.archiveAsScreenshot && !link.image) ||
+            (archivalSettings.archiveAsPDF && !link.pdf)
+          )
+            await handleScreenshotAndPdf(link, page, archivalSettings);
 
           // Monolith
           if (archivalSettings.archiveAsMonolith && !link.monolith && link.url)
-            await handleMonolith(link, content, abortController.signal).catch(
-              (err) => {
-                console.error(err);
-              }
-            );
+            await handleMonolith(link, content);
         }
       })(),
       timeoutPromise,
     ]);
   } catch (err) {
-    console.log("Failed Link:", link.url);
-    console.log("Reason:", err);
+    console.log(err);
+    console.log("Failed Link details:", link);
     throw err;
   } finally {
     const finalLink = await prisma.link.findUnique({
       where: { id: link.id },
     });
+
+    console.log(finalLink);
 
     if (finalLink)
       await prisma.link.update({
@@ -204,9 +205,7 @@ export default async function archiveHandler(
       await removeFiles(link.id, link.collectionId);
     }
 
-    if (browser && browser.isConnected()) {
-      await browser.close();
-    }
+    await browser.close();
   }
 }
 
@@ -257,10 +256,7 @@ export function getBrowserOptions(): LaunchOptions {
     };
   }
 
-  if (
-    process.env.PLAYWRIGHT_LAUNCH_OPTIONS_EXECUTABLE_PATH &&
-    !process.env.PLAYWRIGHT_WS_URL
-  ) {
+  if (process.env.PLAYWRIGHT_LAUNCH_OPTIONS_EXECUTABLE_PATH && !process.env.PLAYWRIGHT_WS_URL) {
     browserOptions.executablePath =
       process.env.PLAYWRIGHT_LAUNCH_OPTIONS_EXECUTABLE_PATH;
   }
@@ -268,10 +264,7 @@ export function getBrowserOptions(): LaunchOptions {
   return browserOptions;
 }
 
-async function getBrowser(): Promise<{
-  browser: Browser;
-  context: BrowserContext;
-}> {
+async function getBrowser(): Promise<{ browser: Browser; context: BrowserContext }> {
   const browserOptions = getBrowserOptions();
   let browser: Browser;
   let contextOptions: BrowserContextOptions = {
